@@ -7,6 +7,9 @@ import (
 	"github.com/oracle/bmcs-go-sdk"
 
 	"github.com/oracle/terraform-provider-oci/crud"
+	"fmt"
+	"crypto/md5"
+	"strings"
 )
 
 func PolicyResource() *schema.Resource {
@@ -42,9 +45,22 @@ func PolicyResource() *schema.Resource {
 			Computed: true,
 		},
 		"statements": {
-			Type:     schema.TypeList,
-			Required: true,
-			Elem:     &schema.Schema{Type: schema.TypeString},
+			Type:             schema.TypeList,
+			Required:         true,
+			DiffSuppressFunc: ignorePolicyFormatDiff(),
+			Elem:             &schema.Schema{Type: schema.TypeString},
+		},
+		"ETag": {
+			Type:     schema.TypeString,
+			Computed: true,
+		},
+		"policyHash": {
+			Type:     schema.TypeString,
+			Computed: true,
+		},
+		"lastUpdateETag": {
+			Type:     schema.TypeString,
+			Computed: true,
 		},
 		"inactive_state": {
 			Type:     schema.TypeInt,
@@ -67,6 +83,27 @@ func PolicyResource() *schema.Resource {
 		Delete:   deletePolicy,
 		Schema:   policySchema,
 	}
+}
+
+func ignorePolicyFormatDiff() schema.SchemaDiffSuppressFunc {
+	return func(k string, old string, new string, d *schema.ResourceData) bool {
+		oldHash := getOrDefault(d, "policyHash", "")
+		newHash := getMD5Hash(toStringArray(d.Get("statements")))
+		oldETag := getOrDefault(d, "lastUpdateETag", "")
+		currentETag := getOrDefault(d, "ETag", "")
+		suppressDiff := strings.EqualFold(oldHash, newHash) && strings.EqualFold(oldETag, currentETag)
+
+		return suppressDiff
+	}
+}
+
+func getOrDefault(d *schema.ResourceData, key string, defaultValue string) string {
+	valueString := defaultValue
+	if value, ok := d.GetOk(key); ok {
+		valueString = value.(string)
+	}
+
+	return valueString;
 }
 
 func createPolicy(d *schema.ResourceData, m interface{}) (e error) {
@@ -131,7 +168,7 @@ func (s *PolicyResourceCrud) DeletedTarget() []string {
 	return []string{baremetal.ResourceDeleted}
 }
 
-func (s *PolicyResourceCrud) toStringArray(vals interface{}) []string {
+func toStringArray(vals interface{}) []string {
 	arr := vals.([]interface{})
 	result := []string{}
 	for _, val := range arr {
@@ -144,9 +181,12 @@ func (s *PolicyResourceCrud) Create() (e error) {
 	name := s.D.Get("name").(string)
 	description := s.D.Get("description").(string)
 	compartmentID := s.D.Get("compartment_id").(string)
-	statements := s.toStringArray(s.D.Get("statements"))
+	statements := toStringArray(s.D.Get("statements"))
 
 	s.Res, e = s.Client.CreatePolicy(name, description, compartmentID, statements, nil)
+
+	s.D.Set("policyHash", getMD5Hash(statements))
+	s.D.Set("lastUpdateETag", s.Res.ETag)
 	return
 }
 
@@ -165,21 +205,29 @@ func (s *PolicyResourceCrud) Update() (e error) {
 	}
 
 	if rawStatements, ok := s.D.GetOk("statements"); ok {
-		statements := s.toStringArray(rawStatements)
+		statements := toStringArray(rawStatements)
 		opts.Statements = statements
+		s.D.Set("policyHash", getMD5Hash(statements))
 	}
 
 	s.Res, e = s.Client.UpdatePolicy(s.D.Id(), opts)
+	s.D.Set("lastUpdateETag", s.Res.ETag)
 	return
 }
 
 func (s *PolicyResourceCrud) SetData() {
 	s.D.Set("statements", s.Res.Statements)
+	s.D.Set("ETag", s.Res.ETag)
 	s.D.Set("name", s.Res.Name)
 	s.D.Set("description", s.Res.Description)
 	s.D.Set("compartment_id", s.Res.CompartmentID)
 	s.D.Set("state", s.Res.State)
 	s.D.Set("time_created", s.Res.TimeCreated.String())
+}
+
+func getMD5Hash(values [] string) string {
+	statements := strings.Join(values, "#");
+	return fmt.Sprintf("%x", md5.Sum([]byte(statements)))
 }
 
 func (s *PolicyResourceCrud) Delete() (e error) {
